@@ -1,0 +1,73 @@
+import torch
+import logging
+from transformers import AutoModelForTokenClassification, AutoTokenizer
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Function to load the model and tokenizer
+def load_model_and_tokenizer(model_name):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForTokenClassification.from_pretrained(model_name)
+    return model, tokenizer
+
+def mask_names_and_orgs(text, ner_model, ner_tokenizer, id2label):
+    """
+    Masks names (PER) and organizations (ORG) in the given text using the provided model and tokenizer.
+    """
+    # Tokenize input text
+    tokens = ner_tokenizer(text, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        outputs = ner_model(**tokens)
+
+    # Get predictions
+    predictions = torch.argmax(outputs.logits, dim=2)
+    tokenized_text = ner_tokenizer.convert_ids_to_tokens(tokens["input_ids"][0])
+
+    # Log tokenized text and predictions
+    logger.debug(f"Tokenized Text: {tokenized_text}")
+    logger.debug(f"Predictions: {[id2label[pred.item()] for pred in predictions[0]]}")
+
+    # Collect entity spans
+    entity_spans = []
+    current_entity = None
+    span_start_idx = None
+
+    for idx, (token, pred) in enumerate(zip(tokenized_text, predictions[0])):
+        entity_label = id2label[pred.item()]
+
+        if entity_label == "B-PER" or entity_label == "I-PER":
+            if not current_entity or current_entity != "PER":
+                if current_entity is not None:
+                    entity_spans.append((span_start_idx, idx - 1, current_entity))
+                span_start_idx = idx
+                current_entity = "PER"
+        elif entity_label == "B-ORG" or entity_label == "I-ORG":
+            if not current_entity or current_entity != "ORG":
+                if current_entity is not None:
+                    entity_spans.append((span_start_idx, idx - 1, current_entity))
+                span_start_idx = idx
+                current_entity = "ORG"
+        else:
+            if current_entity is not None:
+                entity_spans.append((span_start_idx, idx - 1, current_entity))
+            current_entity = None
+            span_start_idx = None
+
+    # Handle last entity
+    if current_entity is not None:
+        entity_spans.append((span_start_idx, len(tokenized_text) - 1, current_entity))
+
+    # Mask entities in tokenized text
+    masked_tokens = tokenized_text[:]
+    for start_idx, end_idx, entity_label in entity_spans:
+        mask_token = "[MASKED_PERSON]" if entity_label == "PER" else "[MASKED_ORG]"
+        for i in range(start_idx, end_idx + 1):
+            masked_tokens[i] = mask_token
+
+    # Reconstruct the masked text
+    masked_text = ner_tokenizer.convert_tokens_to_string(masked_tokens)
+
+    return masked_text
+
